@@ -52,6 +52,9 @@ main.elf: main.o startup_stm32f103xb.o system_stm32f1xx.o $(HAL_PATH)/Src/stm32f
 	$(OBJDUMP) -St $@ >$(@:.elf=.lst)
 	$(SIZE) $@
 	
+_crc.so: crc.c
+	gcc -shared -fPIC -o $@ $^
+
 program: main.elf openocd.cfg
 	openocd -f openocd.cfg -c "program $< verify reset exit"
 

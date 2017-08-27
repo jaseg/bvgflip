@@ -32,55 +32,127 @@ union framebuf_t framebuf;
 
 uint32_t get_tick() { return SysTick->VAL; }
 
+void crc_reset(void) {
+    CRC->CR |= CRC_CR_RESET;
+}
+
+void crc_feed(int data) {
+    CRC->DR = data;
+}
+
 enum Command {
-    NOCMD_IDLE=0,
+    CMD_NONE,
     CMD_PING=0x01,
-    CMD_PIXEL_BLOCK=0x23,
+    CMD_ACK=0x02,
+    CMD_NACK=0x03,
+    CMD_SET_BLOCK=0x23,
     CMD_STROBE=0x42,
-} cmd = NOCMD_IDLE;
+} cmd = CMD_NONE;
 
 enum GlobalOp {
     OP_IDLE,
     OP_UPDATE,
 } global_op = OP_IDLE;
 
+enum SerialState {
+    SER_CMD,
+    SER_SB_IDX,
+    SER_SB_DATA,
+    SER_CRC1,
+    SER_CRC2,
+    SER_INVALID,
+} serial_state = SER_CMD;
+
 void USART1_IRQHandler() {
     int isr = USART1->SR;
     int data = USART1->DR;
+    static uint16_t rx_crc;
 
     /* Overrun detected? */
     if (isr & USART_SR_ORE) {
+        USART1->DR = CMD_NACK;
+        serial_state = SER_INVALID;
         return;
     }
 
-    if (cmd == NOCMD_IDLE) {
+    if (isr & USART_SR_IDLE) {
+        serial_state = SER_CMD;
+        return;
+    }
+
+    switch (serial_state) {
+    case SER_CMD:
+        cmd = data;
+        crc_reset();
+        crc_feed(data);
         switch (data) {
-        case CMD_PIXEL_BLOCK:
-            cmd = data;
+            case CMD_SET_BLOCK:
+                serial_state = SER_SB_IDX;
+                break;
+            case CMD_PING:
+            case CMD_STROBE:
+                serial_state = SER_CRC1;
+                break;
+            default:
+                USART1->DR = CMD_NACK;
+                serial_state = SER_INVALID;
+                break;
+        }
+        break;
+    case SER_SB_IDX:
+        if (data >= COUNT_OF(framebuf.blocks)) {
+            USART1->DR = CMD_NACK;
+            serial_state = SER_INVALID;
             break;
+        }
+        serial_state = SER_SB_DATA;
+        crc_feed(data);
+
+        unsigned int buf_addr = (unsigned int)(framebuf.blocks[data].cols);
+        /* Disable this RX interrupt for duration of DMA transfer */
+        USART1->CR1 &= ~USART_CR1_RXNEIE_Msk;
+        /* Enable DMA transfer to write buffer */
+        DMA1->IFCR |= DMA_IFCR_CGIF3;
+        DMA1_Channel5->CMAR = buf_addr;
+        DMA1_Channel5->CCR |= DMA_CCR_EN;
+
+        DMA1_Channel4->CMAR = buf_addr;
+        DMA1_Channel4->CNDTR = sizeof(framebuf.blocks[0]);
+
+        USART1->CR3 |= USART_CR3_DMAR;
+        break;
+    case SER_CRC1:
+        rx_crc = data;
+        serial_state = SER_CRC2;
+        break;
+    case SER_CRC2:
+        rx_crc |= data<<8;
+        DMA1_Channel4->CCR &= ~DMA_CCR_EN_Msk;
+        if (rx_crc != (CRC->DR&0xFFFF)) {
+            USART1->DR = CMD_NACK;
+            serial_state = SER_INVALID;
+        } else {
+            USART1->DR = CMD_ACK;
+            serial_state = SER_CMD;
+        }
+        
+        switch (cmd) {
         case CMD_STROBE:
             global_op = OP_UPDATE;
-        default:
-            cmd = NOCMD_IDLE;
-            break;
-        }
-    } else {
-        switch (cmd) {
-        case CMD_PIXEL_BLOCK:
-            if (data >= COUNT_OF(framebuf.blocks))
-                break;
-            /* Disable this RX interrupt for duration of DMA transfer */
-            USART1->CR1 &= ~USART_CR1_RXNEIE_Msk;
-            /* Enable DMA transfer to write buffer */
-            DMA1->IFCR |= DMA_IFCR_CGIF3;
-            DMA1_Channel5->CMAR = (unsigned int)(framebuf.blocks[data].cols); /* FIXME */
-            DMA1_Channel5->CCR |= DMA_CCR_EN;
-            USART1->CR3 |= USART_CR3_DMAR;
             break;
         default:
-            cmd = NOCMD_IDLE;
+            break;
         }
+        break;
+    case SER_INVALID:
+        break; /* Don't produce extra NACKs after the first */
+    default:
+        USART1->DR = CMD_NACK;
+        serial_state = SER_INVALID;
+        break;
     }
+    if (serial_state == SER_INVALID) /* FIXME DEBUG */
+        asm("bkpt");
 }
 
 void DMA1_Channel5_IRQHandler() {
@@ -93,12 +165,16 @@ void DMA1_Channel5_IRQHandler() {
     /* re-enable receive interrupt */
     USART1->SR &= ~USART_SR_RXNE_Msk;
     USART1->CR1 |= USART_CR1_RXNEIE;
-    cmd = NOCMD_IDLE;
+
+    /* Kick of CRC calculation */
+    DMA1_Channel4->CCR |= DMA_CCR_EN;
+    serial_state = SER_CRC1;
 }
 
 void uart_config(void) {
     USART1->CR1 = /* 8-bit -> M clear */
           USART_CR1_RXNEIE
+        | USART_CR1_IDLEIE
         | USART_CR1_TE
         | USART_CR1_RE;
     USART1->BRR = 0x1A0; /* 115.2kBd @48.0Mhz */
@@ -107,8 +183,7 @@ void uart_config(void) {
     /* Configure DMA for USART frame data reception */
     DMA1_Channel5->CPAR = (unsigned int)&USART1->DR;
     DMA1_Channel5->CNDTR = sizeof(framebuf.blocks[0]);
-    DMA1_Channel5->CCR = (0<<DMA_CCR_PL_Pos);
-    DMA1_Channel5->CCR |=
+    DMA1_Channel5->CCR =
           (0<<DMA_CCR_MSIZE_Pos) /* 8 bit */
         | (0<<DMA_CCR_PSIZE_Pos) /* 8 bit */
         | DMA_CCR_MINC
@@ -116,13 +191,11 @@ void uart_config(void) {
         | DMA_CCR_CIRC;
 
     DMA1_Channel4->CPAR = (unsigned int)&CRC->DR;
-    //DMA1_Channel4->CMAR = (unsigned int)rx_buf; FIXME
-    DMA1_Channel4->CCR = (0<<DMA_CCR_PL_Pos);
-    DMA1_Channel4->CCR |=
+    DMA1_Channel4->CCR =
           DMA_CCR_MEM2MEM /* Software trigger (precludes CIRC) */
         | DMA_CCR_DIR /* Read from memory */
-        | (0<<DMA_CCR_MSIZE_Pos) /* 8 bit */
-        | (0<<DMA_CCR_PSIZE_Pos) /* 8 bit */
+        | (0<<DMA_CCR_MSIZE_Pos) /*  8 bit */
+        | (2<<DMA_CCR_PSIZE_Pos) /* 32 bit */
         | DMA_CCR_MINC;
 
     NVIC_EnableIRQ(USART1_IRQn);
@@ -240,7 +313,7 @@ int main(void) {
     //    | (4<<RCC_CFGR_PPRE1_Pos) | (0<<RCC_CFGR_PPRE2_Pos);
     SystemCoreClockUpdate();
 
-    RCC->AHBENR |= RCC_AHBENR_DMA1EN;
+    RCC->AHBENR |= RCC_AHBENR_DMA1EN | RCC_AHBENR_CRCEN;
     RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN | RCC_APB2ENR_IOPCEN | RCC_APB2ENR_USART1EN | RCC_APB2ENR_AFIOEN;
 
     inline void config_pin_output(GPIO_TypeDef *gpio, int pin) {
@@ -259,14 +332,14 @@ int main(void) {
     AFIO->MAPR |= AFIO_MAPR_USART1_REMAP;
 
     config_pin_output(GPIOC, 13); /* LED */
-//  config_pin_output(GPIOB, 3); /* CLEAR MOSFET */
-//  /* Display IOs */
-//  for (int pin=0; pin<8; pin++) /* Y0-7 -> PA0-7 */
-//      config_pin_output(GPIOA, pin);
-//  for (int pin=8; pin<16; pin++) /* Y8-15 -> PB8-15 */
-//      config_pin_output(GPIOB, pin);
-//  for (int pin=8; pin<15; pin++) /* aux -> PA8-14 */
-//      config_pin_output(GPIOA, pin);
+    config_pin_output(GPIOB, 3); /* CLEAR MOSFET */
+    /* Display IOs */
+    for (int pin=0; pin<8; pin++) /* Y0-7 -> PA0-7 */
+        config_pin_output(GPIOA, pin);
+    for (int pin=8; pin<16; pin++) /* Y8-15 -> PB8-15 */
+        config_pin_output(GPIOB, pin);
+    for (int pin=8; pin<15; pin++) /* aux -> PA8-14 */
+        config_pin_output(GPIOA, pin);
 
     uart_config();
 

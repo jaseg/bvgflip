@@ -5,4 +5,6 @@
 *.o
 *.map
 *.lst
+_crc.so
+__pycache__
 cmsis_exports.c
