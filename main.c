@@ -19,7 +19,7 @@ static volatile unsigned int sys_time;
 
 /* 16px by 115px */
 
-#define NBLOCKS 8
+#define NBLOCKS 16
 #define NCOLS   115
 uint8_t module_sizes[5] = {25, 20, 20, 25, 25};
 union framebuf_t {
@@ -29,8 +29,6 @@ union framebuf_t {
     uint16_t cols[NCOLS];
 };
 union framebuf_t framebuf;
-
-uint32_t get_tick() { return SysTick->VAL; }
 
 void crc_reset(void) {
     CRC->CR |= CRC_CR_RESET;
@@ -49,7 +47,7 @@ enum Command {
     CMD_STROBE=0x42,
 } cmd = CMD_NONE;
 
-enum GlobalOp {
+volatile enum GlobalOp {
     OP_IDLE,
     OP_UPDATE,
 } global_op = OP_IDLE;
@@ -151,8 +149,6 @@ void USART1_IRQHandler() {
         serial_state = SER_INVALID;
         break;
     }
-    if (serial_state == SER_INVALID) /* FIXME DEBUG */
-        asm("bkpt");
 }
 
 void DMA1_Channel5_IRQHandler() {
@@ -197,29 +193,37 @@ void uart_config(void) {
         | (2<<DMA_CCR_PSIZE_Pos) /* 32 bit */
         | DMA_CCR_MINC;
 
-    /* FIXME DEBUg
     NVIC_EnableIRQ(USART1_IRQn);
     NVIC_SetPriority(USART1_IRQn, 4);
     NVIC_EnableIRQ(DMA1_Channel5_IRQn);
     NVIC_SetPriority(DMA1_Channel5_IRQn, 3);
-    */
 }
 
-void set_col(uint16_t val) {
-    GPIOA->ODR = (GPIOA->ODR &  0xFF00) | (val&0x00FF);
-    GPIOB->ODR = (GPIOB->ODR &  0x00FF) | (val&0xFF00);
+void col_data(uint16_t val) {
+    GPIOA->ODR = (GPIOA->ODR & 0xFF00) | (val&0x00FF);
+    GPIOB->ODR = (GPIOB->ODR & 0x00FF) | (val&0xFF00);
 }
 
-/* not very accurate */
 void delay_us(int val) {
+    /* TODO apply correction constant for function call & timer config overhead */
+    /* AHB2 frequency 24MHz */
+    /*
+    TIM2->CR1 = TIM_CR1_OPM | TIM_CR1_URS;
+    TIM2->PSC = 24; // 1 tick per us
+    TIM2->ARR = val;
+    TIM2->CR1 |= TIM_CR1_CEN;
+    while (!(TIM2->SR&TIM_SR_UIF))
+        ;
+    TIM2->SR |= TIM_SR_UIF;
+    while (!(TIM2->SR&TIM_SR_UIF))
+        ;
+    TIM2->SR = TIM_SR_UIF;
+    */
     while (val--) {
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
-        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
+        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
+        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
+        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
+        asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
         asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
     }
 }
@@ -249,51 +253,69 @@ void sel(int val) {
     GPIOA->ODR = (GPIOA->ODR & ~(0x1F<<8)) | (val<<8);
 }
 
-void module_init(int module) {
-    set_col(0x0000); clr(0); clk(0); rst(0); sel(1<<module);
-    delay_us(10);  /*******************************/
+#define LOGIC_DELAY_US 100
+#define tick() delay_us(LOGIC_DELAY_US)
+#define DISPLAY_DELAY_US 1000
+#define bigtick() delay_us(DISPLAY_DELAY_US)
 
-    set_col(0xFFFF);
-    delay_us(200); /*******************************/
+void select_module(int module) {
+    /* reset */
+    col_data(0x0000); clr(0); clk(0); rst(0); sel(0x1F);
+    tick();
+                                      rst(1);
+    tick();
 
-    set_col(0x0000); clr(1); clk(0);
-    delay_us(100); /*******************************/
-
-                                     rst(1); sel(0);
-    delay_us(200); /*******************************/
-
-                     clr(0); clk(1);
-    delay_us(20);  /*******************************/
-
-                             clk(0);         sel(1<<module);
-    delay_us(30);  /*******************************/
-
-                     clr(1);
+    /* assert data and clock in */
+                                             sel(0x1F ^ (1<<module));
+    tick();
+                             clk(1);                   
+    tick();
+                             clk(0);                   
+    tick();
+                                             sel(0x1F);
+    tick();
 }
 
-#define FLIP_TIME_US 800
-void tx_row(uint16_t data, int delay, int module) {
-    delay_us(delay); /*******************************/
+void clear_cols(int count) {
+    /* FIXME timing on this, also which cycles are actually necessary */
+    clr(1);
+    while(count--) {
+        col_data(0x0000);
+        tick();
+                              clk(1);
+        bigtick();
+        bigtick();
+                              clk(0);
+        tick();
+        col_data(0xFFFF);
+        tick();
+                              clk(1);
+        tick();
+                              clk(0);
+        tick();
+    }
+    clr(0);
+}
 
-                        clr(0); clk(0); rst(1); sel(1<<module);
-    delay_us(10);    /*******************************/
-
-                                clk(1);
-    delay_us(10);    /*******************************/
-
-    set_col(data);              clk(0);
-    delay_us(delay); /*******************************/
-
-    set_col(0x0000);    clr(1);        
-    delay_us(10);    /*******************************/
-
-                        clr(0); clk(1);
-    delay_us(10);    /*******************************/
-
-                                clk(0);
-    delay_us(10);    /*******************************/
-
-                        clr(1);        
+void set_col(uint16_t data) {
+    col_data(0x0000);
+    tick();
+                             clk(1);
+    tick();
+                             clk(0);
+    tick();
+    col_data(data);
+    tick();
+                             clk(1);
+    bigtick();
+    bigtick();
+    bigtick();
+    bigtick();
+    bigtick();
+    bigtick();
+    bigtick();
+                             clk(0);
+    tick();
 }
 
 int main(void) {
@@ -316,6 +338,7 @@ int main(void) {
 
     RCC->AHBENR |= RCC_AHBENR_DMA1EN | RCC_AHBENR_CRCEN;
     RCC->APB2ENR |= RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN | RCC_APB2ENR_IOPCEN | RCC_APB2ENR_USART1EN | RCC_APB2ENR_AFIOEN;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
 
     inline void config_pin_output(GPIO_TypeDef *gpio, int pin) {
         if (pin < 8) {
@@ -333,9 +356,9 @@ int main(void) {
     AFIO->MAPR |= AFIO_MAPR_USART1_REMAP | (1<<AFIO_MAPR_SWJ_CFG_Pos);
 
     config_pin_output(GPIOC, 13); /* LED */
-    config_pin_output(GPIOB, 0); /* CLEAR MOSFET */
-    config_pin_output(GPIOB, 4); /* CLK */
-    config_pin_output(GPIOB, 5); /* RST */
+    config_pin_output(GPIOB, 0);  /* big fat column clear MOSFET */
+    config_pin_output(GPIOB, 4);  /* CLK */
+    config_pin_output(GPIOB, 5);  /* RST */
     /* Display IOs */
     for (int pin=0; pin<8; pin++) /* Y0-7 -> PA0-7 */
         config_pin_output(GPIOA, pin);
@@ -346,86 +369,21 @@ int main(void) {
 
     uart_config();
 
-    SysTick_Config(SystemCoreClock/1000); /* 1ms interval */
-    int offx = 0;
+    SysTick_Config(SystemCoreClock); /* 1s interval */
     while (42) {
-        if (1) {
-            /* reset */
-            set_col(0x0000); clr(0); clk(0); rst(0); sel(0x1F);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
-            delay_us(100);
-
-            /* assert data and clock in */
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(1); rst(1); sel(0x00);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
-            delay_us(100);
-
-            for (int i=0; i<50; i++) {
-                uint16_t val = i&1 ? 0x0000 : 0xFFFF;
-                set_col(val); clr(1); clk(1); rst(1); sel(0x1F);
-                delay_us(1000);
-                set_col(val); clr(1); clk(0); rst(1); sel(0x1F);
-                delay_us(1000);
-            }
-
-            clr(0);
-            //delay_us(1000000);
-        }
-
-        if (1) {
-            /* reset */
-            set_col(0x0000); clr(0); clk(0); rst(0); sel(0x1F);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
-            delay_us(100);
-
-            /* assert data and clock in */
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(1); rst(1); sel(0x00);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
-            delay_us(100);
-            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
-            delay_us(100);
-
-            uint32_t narf = 0xCCCCCCCC >> offx;
-            offx++;
-            if (offx == 4)
-                offx = 0;
-            for (int i=0; i<50; i++) {
-                uint16_t val = i&1 ? narf : 0x0000;
-                if (i&1) {
-                    narf = narf<<1 | narf>>15;
-                }
-                set_col(val); clr(0); clk(1); rst(1); sel(0x1F);
-                delay_us(1000);
-                set_col(val); clr(0); clk(0); rst(1); sel(0x1F);
-                delay_us(1000);
-            }
-            delay_us(100000);
-        }
-    }
-    {
-        //if (global_op == OP_UPDATE)
+        if (global_op == OP_UPDATE)
         {
             global_op = OP_IDLE;
             uint16_t *dp = framebuf.cols;
             for (int module=0; module<COUNT_OF(module_sizes); module++) {
-                module_init(module);
-                for (int col=0; col<module_sizes[module]; col++) {
-                    *dp = (col & 1) ? 0xFFFF : 0x0000;
-                    tx_row(*dp++, FLIP_TIME_US, module);
-                }
+                int size = module_sizes[module];
+                select_module(module);
+                clear_cols(size);
+                select_module(module);
+                for (int col=0; col<size; col++)
+                    set_col(*dp++);
             }
         }
-        delay_us(1000000);
     }
 }
 
