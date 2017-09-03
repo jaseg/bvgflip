@@ -160,7 +160,6 @@ void DMA1_Channel5_IRQHandler() {
     /* ...and disable this DMA channel */
     USART1->CR3 &= ~USART_CR3_DMAR_Msk;
     DMA1_Channel5->CCR &= ~DMA_CCR_EN_Msk;
-    /* Kick off formatting code in main loop outside interrupt context */
     DMA1->IFCR |= DMA_IFCR_CGIF5;
     /* re-enable receive interrupt */
     USART1->SR &= ~USART_SR_RXNE_Msk;
@@ -198,15 +197,17 @@ void uart_config(void) {
         | (2<<DMA_CCR_PSIZE_Pos) /* 32 bit */
         | DMA_CCR_MINC;
 
+    /* FIXME DEBUg
     NVIC_EnableIRQ(USART1_IRQn);
     NVIC_SetPriority(USART1_IRQn, 4);
     NVIC_EnableIRQ(DMA1_Channel5_IRQn);
     NVIC_SetPriority(DMA1_Channel5_IRQn, 3);
+    */
 }
 
 void set_col(uint16_t val) {
-    GPIOA->ODR = (GPIOA->ODR & ~0x00FF) | (val&0xFF);
-    GPIOB->ODR = (GPIOB->ODR & ~0xFF00) | (val>>8);
+    GPIOA->ODR = (GPIOA->ODR &  0xFF00) | (val&0x00FF);
+    GPIOB->ODR = (GPIOB->ODR &  0x00FF) | (val&0xFF00);
 }
 
 /* not very accurate */
@@ -225,27 +226,27 @@ void delay_us(int val) {
 
 void clr(bool val) {
     if (val)
-        GPIOB->BSRR |= 1<<3;
+        GPIOB->BSRR |= 1<<0;
     else
-        GPIOB->BRR |= 1<<3;
+        GPIOB->BRR |= 1<<0;
 }
 
 void clk(bool val) {
     if (val)
-        GPIOA->BSRR |= 1<<8;
+        GPIOB->BSRR |= 1<<4;
     else
-        GPIOA->BRR |= 1<<8;
+        GPIOB->BRR |= 1<<4;
 }
 
 void rst(bool val) {
     if (val)
-        GPIOA->BSRR |= 1<<9;
+        GPIOB->BSRR |= 1<<5;
     else
-        GPIOA->BRR |= 1<<9;
+        GPIOB->BRR |= 1<<5;
 }
 
 void sel(int val) {
-    GPIOA->ODR = (GPIOA->ODR & ~(0x1F<<10)) | (val<<10);
+    GPIOA->ODR = (GPIOA->ODR & ~(0x1F<<8)) | (val<<8);
 }
 
 void module_init(int module) {
@@ -329,32 +330,102 @@ int main(void) {
     /* UART IOs. TX -> PB6, RX -> PB7 */
     GPIOB->CRL = (GPIOB->CRL & 0x00FFFFFF) | 0x89000000;
     GPIOB->ODR |= (1<<7);
-    AFIO->MAPR |= AFIO_MAPR_USART1_REMAP;
+    AFIO->MAPR |= AFIO_MAPR_USART1_REMAP | (1<<AFIO_MAPR_SWJ_CFG_Pos);
 
     config_pin_output(GPIOC, 13); /* LED */
-    config_pin_output(GPIOB, 3); /* CLEAR MOSFET */
+    config_pin_output(GPIOB, 0); /* CLEAR MOSFET */
+    config_pin_output(GPIOB, 4); /* CLK */
+    config_pin_output(GPIOB, 5); /* RST */
     /* Display IOs */
     for (int pin=0; pin<8; pin++) /* Y0-7 -> PA0-7 */
         config_pin_output(GPIOA, pin);
     for (int pin=8; pin<16; pin++) /* Y8-15 -> PB8-15 */
         config_pin_output(GPIOB, pin);
-    for (int pin=8; pin<15; pin++) /* aux -> PA8-14 */
+    for (int pin=8; pin<13; pin++) /* aux -> PA8-12 */
         config_pin_output(GPIOA, pin);
 
     uart_config();
 
     SysTick_Config(SystemCoreClock/1000); /* 1ms interval */
+    int offx = 0;
     while (42) {
-        if (global_op == OP_UPDATE) {
+        if (1) {
+            /* reset */
+            set_col(0x0000); clr(0); clk(0); rst(0); sel(0x1F);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
+            delay_us(100);
+
+            /* assert data and clock in */
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(1); rst(1); sel(0x00);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
+            delay_us(100);
+
+            for (int i=0; i<50; i++) {
+                uint16_t val = i&1 ? 0x0000 : 0xFFFF;
+                set_col(val); clr(1); clk(1); rst(1); sel(0x1F);
+                delay_us(1000);
+                set_col(val); clr(1); clk(0); rst(1); sel(0x1F);
+                delay_us(1000);
+            }
+
+            clr(0);
+            //delay_us(1000000);
+        }
+
+        if (1) {
+            /* reset */
+            set_col(0x0000); clr(0); clk(0); rst(0); sel(0x1F);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
+            delay_us(100);
+
+            /* assert data and clock in */
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(1); rst(1); sel(0x00);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x00);
+            delay_us(100);
+            set_col(0x0000); clr(0); clk(0); rst(1); sel(0x1F);
+            delay_us(100);
+
+            uint32_t narf = 0xCCCCCCCC >> offx;
+            offx++;
+            if (offx == 4)
+                offx = 0;
+            for (int i=0; i<50; i++) {
+                uint16_t val = i&1 ? narf : 0x0000;
+                if (i&1) {
+                    narf = narf<<1 | narf>>15;
+                }
+                set_col(val); clr(0); clk(1); rst(1); sel(0x1F);
+                delay_us(1000);
+                set_col(val); clr(0); clk(0); rst(1); sel(0x1F);
+                delay_us(1000);
+            }
+            delay_us(100000);
+        }
+    }
+    {
+        //if (global_op == OP_UPDATE)
+        {
             global_op = OP_IDLE;
             uint16_t *dp = framebuf.cols;
             for (int module=0; module<COUNT_OF(module_sizes); module++) {
                 module_init(module);
                 for (int col=0; col<module_sizes[module]; col++) {
+                    *dp = (col & 1) ? 0xFFFF : 0x0000;
                     tx_row(*dp++, FLIP_TIME_US, module);
                 }
             }
         }
+        delay_us(1000000);
     }
 }
 

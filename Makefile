@@ -9,7 +9,7 @@ OBJCOPY := arm-none-eabi-objcopy
 OBJDUMP := arm-none-eabi-objdump
 SIZE    := arm-none-eabi-size
 
-CFLAGS  = -g -Wall -std=gnu11 -O0 -fdump-rtl-expand
+CFLAGS  = -g -Wall -std=gnu11 -O1 -fdump-rtl-expand
 CFLAGS += -mlittle-endian -mcpu=cortex-m3 -mthumb
 #CFLAGS += -ffunction-sections -fdata-sections
 LDFLAGS = -nostartfiles
